@@ -11,6 +11,8 @@ export default function SearchPage() {
   const { query, results, loading, error, page, hasMore } = useAppSelector((s: RootState) => s.search)
   const [term, setTerm] = useState<string>(query)
   const debounced = useDebouncedValue(term, 250)
+  const [localError, setLocalError] = useState<string | null>(null)
+  type UnwrapablePromise = { unwrap?: () => Promise<unknown>; abort?: () => void }
 
   // track the pending thunk promise so we can abort it if a new request starts
   type Abortable = { abort?: () => void }
@@ -23,21 +25,47 @@ export default function SearchPage() {
     if (pendingRef.current && typeof pendingRef.current.abort === 'function') {
       try {
         pendingRef.current.abort!()
-      } catch {
-        // ignore abort errors
+      } catch (e) {
+        console.debug('[SearchPage] abort previous pending thunk failed', e)
       }
     }
 
-  console.debug('[SearchPage] dispatching search', debounced, page)
-  const pending = dispatch(fetchSearch({ query: debounced, page }))
-    pendingRef.current = pending
+    console.debug('[SearchPage] dispatching search', debounced, page)
+    // dispatch the thunk and unwrap to catch rejections locally
+  const pending = dispatch(fetchSearch({ query: debounced, page })) as UnwrapablePromise
+  pendingRef.current = pending
+
+    // when the thunk resolves or rejects we want to handle errors locally
+    pending
+      .unwrap?.()
+      .then(() => {
+        // clear any local error on success
+        setLocalError(null)
+      })
+      .catch((e: unknown) => {
+        // If the error is an AbortError (fetch was cancelled), ignore it
+        const isObject = typeof e === 'object' && e !== null
+        const name = isObject ? (e as { name?: string }).name : undefined
+        const message = isObject ? (e as { message?: unknown }).message : undefined
+        const isAbort = name === 'AbortError' || message === 'cancelled'
+        if (isAbort) {
+          // do not set an error for user-initiated cancellation
+          console.debug('[SearchPage] search aborted')
+          return
+        }
+
+        // For other errors, set a local error message so the UI can display it
+        const msg = message ? String(message) : String(e ?? 'Unknown error')
+        console.error('[SearchPage] search failed', e)
+        setLocalError(msg)
+      })
 
     return () => {
       if (pendingRef.current && typeof pendingRef.current.abort === 'function') {
         try {
           pendingRef.current.abort!()
-        } catch {
-          // ignore
+        } catch (e) {
+          console.debug('[SearchPage] abort on unmount failed', e)
         }
       }
     }
@@ -77,6 +105,7 @@ export default function SearchPage() {
         {!loading && results.length === 0 && <Text>No results. Try another query.</Text>}
 
         {error && <Text color="red.500">{error}</Text>}
+        {localError && <Text color="red.500">{localError}</Text>}
 
         <Grid templateColumns="repeat(auto-fill, minmax(140px, 1fr))" gap={4} mt={4}>
           {(results ?? []).map((r: { mal_id: number; image_url: string; title: string }) => (
